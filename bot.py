@@ -12,8 +12,9 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 # =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = 5368309201  # 🔴 CHANGE THIS TO YOUR TELEGRAM ID
-ADMIN_IDS = set()
+
+# 🔴 CHANGE THIS
+OWNER_ID = 5368309201  
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
@@ -47,6 +48,12 @@ CREATE TABLE IF NOT EXISTS questions (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY
+)
+""")
+
 conn.commit()
 
 # =========================
@@ -64,6 +71,12 @@ def get_user(user_id):
 # ADMIN SYSTEM
 # =========================
 
+def is_admin(user_id):
+    if user_id == OWNER_ID:
+        return True
+    data = cursor.execute("SELECT user_id FROM admins WHERE user_id=?", (user_id,)).fetchone()
+    return data is not None
+
 @bot.message_handler(commands=['addadmin'])
 def add_admin(message):
     if message.from_user.id != OWNER_ID:
@@ -71,8 +84,9 @@ def add_admin(message):
 
     try:
         new_admin = int(message.text.split()[1])
-        ADMIN_IDS.add(new_admin)
-        bot.reply_to(message, "✅ Admin added")
+        cursor.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (new_admin,))
+        conn.commit()
+        bot.reply_to(message, "✅ Admin added permanently")
     except:
         bot.reply_to(message, "Usage: /addadmin USER_ID")
 
@@ -84,7 +98,7 @@ pending_ocr = {}
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(message):
-    if message.from_user.id not in ADMIN_IDS and message.from_user.id != OWNER_ID:
+    if not is_admin(message.from_user.id):
         return
 
     file_info = bot.get_file(message.photo[-1].file_id)
@@ -93,7 +107,7 @@ def handle_photo(message):
     with open("temp.jpg", "wb") as f:
         f.write(downloaded)
 
-    text = pytesseract.image_to_string(Image.open("temp.jpg"))
+    text = pytesseract.image_to_string(Image.open("temp.jpg"), lang='eng')
 
     try:
         q = text.split("Q:")[1].split("A.")[0].strip()
@@ -110,11 +124,11 @@ def handle_photo(message):
 
         bot.send_message(
             message.chat.id,
-            f"📌 Preview:\n\n{q}\nA. {a}\nB. {b}\nC. {c}\nD. {d}\n\nAnswer: {ans}",
+            f"📌 Preview:\n\n{q}\n\nA. {a}\nB. {b}\nC. {c}\nD. {d}\n\nAnswer: {ans}",
             reply_markup=markup
         )
-    except:
-        bot.reply_to(message, "❌ Failed to parse OCR")
+    except Exception as e:
+        bot.reply_to(message, f"❌ OCR Parse Failed\n\n{text}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "confirm_ocr")
 def confirm_ocr(call):
@@ -185,8 +199,14 @@ def ask_question(user_id, chat_id):
     qid, ques, a, b, c, d, correct, _ = q
 
     markup = InlineKeyboardMarkup()
-    for opt in ["A", "B", "C", "D"]:
-        markup.add(InlineKeyboardButton(opt, callback_data=f"ans_{opt}_{qid}"))
+    markup.add(
+        InlineKeyboardButton(f"A. {a}", callback_data=f"ans_A_{qid}"),
+        InlineKeyboardButton(f"B. {b}", callback_data=f"ans_B_{qid}")
+    )
+    markup.add(
+        InlineKeyboardButton(f"C. {c}", callback_data=f"ans_C_{qid}"),
+        InlineKeyboardButton(f"D. {d}", callback_data=f"ans_D_{qid}")
+    )
 
     user_quiz[user_id] = correct
 
@@ -197,7 +217,8 @@ def ask_question(user_id, chat_id):
 def question_timer(user_id, chat_id):
     time.sleep(10)
     if user_id in user_quiz:
-        bot.send_message(chat_id, f"⏱ Time up! Answer: {user_quiz[user_id]}")
+        correct = user_quiz[user_id]
+        bot.send_message(chat_id, f"⏱ Time up!\nCorrect answer: {correct}")
         del user_quiz[user_id]
 
 @bot.message_handler(commands=['quiz'])
@@ -214,9 +235,10 @@ def answer(call):
         return
 
     if chosen == correct:
-        cursor.execute("UPDATE users SET score = score + 10 WHERE user_id=?", (user_id,))
+        cursor.execute("UPDATE users SET score = score + 10, streak = streak + 1 WHERE user_id=?", (user_id,))
         bot.answer_callback_query(call.id, "✅ Correct!")
     else:
+        cursor.execute("UPDATE users SET streak = 0 WHERE user_id=?", (user_id,))
         bot.answer_callback_query(call.id, "❌ Wrong!")
 
     conn.commit()
@@ -229,7 +251,10 @@ def answer(call):
 @bot.message_handler(commands=['profile'])
 def profile(message):
     user = get_user(message.from_user.id)
-    bot.send_message(message.chat.id, f"🏆 Score: {user[1]}\n🔥 Streak: {user[2]}")
+    bot.send_message(
+        message.chat.id,
+        f"👤 Profile\n\n🏆 Score: {user[1]}\n🔥 Streak: {user[2]}"
+    )
 
 # =========================
 # LEADERBOARD
@@ -237,7 +262,7 @@ def profile(message):
 
 @bot.message_handler(commands=['leaderboard'])
 def leaderboard(message):
-    top = cursor.execute("SELECT user_id, score FROM users ORDER BY score DESC LIMIT 5").fetchall()
+    top = cursor.execute("SELECT user_id, score FROM users ORDER BY score DESC LIMIT 10").fetchall()
 
     text = "🏆 Leaderboard:\n\n"
     for i, u in enumerate(top, 1):
