@@ -6,11 +6,7 @@ import time
 import threading
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-print("🚀 Starting Advanced Quiz Bot...")
-
-# =========================
-# TOKEN
-# =========================
+print("🚀 Starting Kahoot Quiz Bot...")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
@@ -29,8 +25,7 @@ cursor = conn.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
-    score INTEGER DEFAULT 0,
-    streak INTEGER DEFAULT 0
+    score INTEGER DEFAULT 0
 )
 """)
 
@@ -41,153 +36,144 @@ conn.commit()
 # =========================
 
 questions = [
-    {
-        "q": "What is 2 + 2?",
-        "options": ["3", "4", "5", "6"],
-        "answer": "4"
-    },
-    {
-        "q": "Capital of India?",
-        "options": ["Mumbai", "Delhi", "Kolkata", "Chennai"],
-        "answer": "Delhi"
-    },
-    {
-        "q": "Which is a programming language?",
-        "options": ["Python", "Snake", "Lion", "Tiger"],
-        "answer": "Python"
-    }
+    {"q": "2+2?", "options": ["3", "4", "5", "6"], "answer": "4"},
+    {"q": "Capital of India?", "options": ["Mumbai", "Delhi", "Goa", "Chennai"], "answer": "Delhi"},
+    {"q": "Python is?", "options": ["Animal", "Language", "Car", "Game"], "answer": "Language"}
 ]
 
 # =========================
-# USER SYSTEM
+# GAME STATE
 # =========================
 
-def create_user(user_id):
-    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-    conn.commit()
+group_games = {}
 
 # =========================
-# QUIZ STATE
+# START GAME
 # =========================
 
-active_quiz = {}
+@bot.message_handler(commands=['startgame'])
+def start_game(message):
+    chat_id = message.chat.id
 
-# =========================
-# COMMANDS
-# =========================
+    if message.chat.type == "private":
+        return bot.send_message(chat_id, "❌ Use this in a group!")
 
-@bot.message_handler(commands=['start'])
-def start(message):
-    create_user(message.from_user.id)
-    bot.send_message(message.chat.id, "👋 Welcome!\nUse /quiz to start.")
-
-@bot.message_handler(commands=['quiz'])
-def quiz(message):
-    user_id = message.from_user.id
-    q = random.choice(questions)
-
-    active_quiz[user_id] = {
-        "answer": q["answer"],
+    group_games[chat_id] = {
+        "scoreboard": {},
+        "current": 0,
+        "active": True,
         "answered": False
     }
+
+    bot.send_message(chat_id, "🎮 Game started! Get ready...")
+    ask_group_question(chat_id)
+
+# =========================
+# ASK QUESTION
+# =========================
+
+def ask_group_question(chat_id):
+    game = group_games.get(chat_id)
+
+    if not game or not game["active"]:
+        return
+
+    if game["current"] >= len(questions):
+        end_game(chat_id)
+        return
+
+    q = questions[game["current"]]
+    game["answered"] = False
 
     markup = InlineKeyboardMarkup()
 
     for opt in q["options"]:
-        markup.add(InlineKeyboardButton(opt, callback_data=f"ans_{opt}"))
+        markup.add(InlineKeyboardButton(opt, callback_data=f"gans_{opt}"))
 
     bot.send_message(
-        message.chat.id,
-        f"❓ {q['q']}\n⏱ You have 10 seconds!",
+        chat_id,
+        f"❓ {q['q']}\n⏱ 10 seconds!",
         reply_markup=markup
     )
 
-    # Start timer
-    threading.Thread(target=timer, args=(user_id, message.chat.id)).start()
+    threading.Thread(target=group_timer, args=(chat_id,)).start()
 
 # =========================
 # TIMER
 # =========================
 
-def timer(user_id, chat_id):
+def group_timer(chat_id):
     time.sleep(10)
 
-    if user_id in active_quiz and not active_quiz[user_id]["answered"]:
-        correct = active_quiz[user_id]["answer"]
-        bot.send_message(chat_id, f"⏱ Time's up!\n✅ Answer: {correct}")
-        del active_quiz[user_id]
+    game = group_games.get(chat_id)
+    if not game or game["answered"]:
+        return
+
+    correct = questions[game["current"]]["answer"]
+
+    bot.send_message(chat_id, f"⏱ Time's up!\n✅ Answer: {correct}")
+
+    game["current"] += 1
+    ask_group_question(chat_id)
 
 # =========================
 # ANSWER HANDLER
 # =========================
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("ans_"))
-def answer(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("gans_"))
+def handle_group_answer(call):
+    chat_id = call.message.chat.id
     user_id = call.from_user.id
 
-    if user_id not in active_quiz:
-        return
+    game = group_games.get(chat_id)
 
-    if active_quiz[user_id]["answered"]:
+    if not game or game["answered"]:
         return
 
     selected = call.data.split("_")[1]
-    correct = active_quiz[user_id]["answer"]
-
-    active_quiz[user_id]["answered"] = True
+    correct = questions[game["current"]]["answer"]
 
     if selected == correct:
-        cursor.execute(
-            "UPDATE users SET score = score + 10, streak = streak + 1 WHERE user_id=?",
-            (user_id,)
+        game["answered"] = True
+
+        # update score
+        if user_id not in game["scoreboard"]:
+            game["scoreboard"][user_id] = 0
+
+        game["scoreboard"][user_id] += 10
+
+        bot.send_message(
+            chat_id,
+            f"🏆 {call.from_user.first_name} answered first!\n+10 points"
         )
-        bot.answer_callback_query(call.id, "✅ Correct!")
-        bot.send_message(call.message.chat.id, "🎉 Correct! +10 points")
-    else:
-        cursor.execute(
-            "UPDATE users SET streak = 0 WHERE user_id=?",
-            (user_id,)
-        )
-        bot.answer_callback_query(call.id, "❌ Wrong!")
-        bot.send_message(call.message.chat.id, f"❌ Wrong!\n✅ Answer: {correct}")
 
-    conn.commit()
-    del active_quiz[user_id]
+        game["current"] += 1
+        time.sleep(2)
+        ask_group_question(chat_id)
 
 # =========================
-# PROFILE
+# END GAME
 # =========================
 
-@bot.message_handler(commands=['profile'])
-def profile(message):
-    user = cursor.execute(
-        "SELECT score, streak FROM users WHERE user_id=?",
-        (message.from_user.id,)
-    ).fetchone()
+def end_game(chat_id):
+    game = group_games.get(chat_id)
 
-    bot.send_message(
-        message.chat.id,
-        f"👤 Profile\n\n🏆 Score: {user[0]}\n🔥 Streak: {user[1]}"
-    )
+    if not game:
+        return
 
-# =========================
-# LEADERBOARD
-# =========================
+    text = "🏁 Game Over!\n\n🏆 Final Leaderboard:\n\n"
 
-@bot.message_handler(commands=['leaderboard'])
-def leaderboard(message):
-    top = cursor.execute(
-        "SELECT user_id, score FROM users ORDER BY score DESC LIMIT 5"
-    ).fetchall()
+    sorted_scores = sorted(game["scoreboard"].items(), key=lambda x: x[1], reverse=True)
 
-    text = "🏆 Leaderboard:\n\n"
-    for i, u in enumerate(top, 1):
-        text += f"{i}. {u[0]} — {u[1]} pts\n"
+    for i, (uid, score) in enumerate(sorted_scores, 1):
+        text += f"{i}. {uid} — {score} pts\n"
 
-    bot.send_message(message.chat.id, text)
+    bot.send_message(chat_id, text)
+
+    del group_games[chat_id]
 
 # =========================
-# RUN (SAFE LOOP)
+# RUN
 # =========================
 
 while True:
